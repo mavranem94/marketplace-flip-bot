@@ -30,6 +30,17 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
     results = []
     async with async_playwright() as p:
         chromium_path = os.environ.get("CHROMIUM_PATH")
+        possible_paths = [
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/usr/bin/google-chrome"
+        ]
+        if not chromium_path:
+            for path in possible_paths:
+                if os.path.exists(path):
+                    chromium_path = path
+                    break
+
         launch_options = {
             "headless": headless,
             "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process", "--disable-setuid-sandbox"]
@@ -41,8 +52,13 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
         context = await browser.new_context()
         page = await context.new_page()
 
-        await page.goto(GUMTREE_URL, wait_until="networkidle")
+        await page.goto(GUMTREE_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
+
+        # Scroll to load more listings
+        for _ in range(8):
+            await page.mouse.wheel(0, 3000)
+            await page.wait_for_timeout(1500)
 
         listings = await page.query_selector_all('article[data-q="search-result"]')
         count = 0
