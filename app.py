@@ -50,8 +50,16 @@ async def facebook_login_and_page(playwright, headless=True):
     # Attempt to use system-installed Chromium path if available
     chromium_path = os.environ.get("CHROMIUM_PATH")
     if not chromium_path:
-        # Try common install location in Streamlit Cloud
-        chromium_path = "/usr/bin/chromium-browser"
+        # Try common install locations in container environments
+        possible_paths = [
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/usr/bin/google-chrome"
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                chromium_path = path
+                break
 
     launch_options = {
         "headless": headless,
@@ -65,11 +73,13 @@ async def facebook_login_and_page(playwright, headless=True):
     }
     if chromium_path and os.path.exists(chromium_path):
         launch_options["executable_path"] = chromium_path
+    else:
+        raise RuntimeError(f"No valid Chromium executable found. Tried paths: {possible_paths} and CHROMIUM_PATH env.")
 
     try:
         browser = await playwright.chromium.launch(**launch_options)
     except Exception as e:
-        raise RuntimeError(f"Failed to launch Chromium. Checked path: {chromium_path}. Error: {e}")
+        raise RuntimeError(f"Failed to launch Chromium. Checked path: {chromium_path}. Error: {type(e).__name__}: {e}")
 
     context = await browser.new_context()
     page = await context.new_page()
