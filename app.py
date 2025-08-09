@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from playwright.async_api import async_playwright
 
-MAX_LISTINGS = 50
+MAX_LISTINGS = 100
 TARGET_LOCATION = st.session_state.get("target_location", "London")
 GUMTREE_URL = f"https://www.gumtree.com/search?search_category=for-sale&search_location={TARGET_LOCATION.lower()}"
 
@@ -41,13 +41,13 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
         context = await browser.new_context()
         page = await context.new_page()
 
-        await page.goto(GUMTREE_URL, wait_until="networkidle")
-        await page.wait_for_timeout(3000)
+        await page.goto(GUMTREE_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(2000)
 
         # Scroll to load more
-        for _ in range(15):
+        for _ in range(25):
             await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1200)
 
         listings = await page.query_selector_all('article[data-q="search-result"]')
         count = 0
@@ -71,7 +71,7 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
 
             if any(k.lower() in title.lower() for k in keywords):
                 results.append({
-                    "title": title,
+                    "title": title.strip(),
                     "price": price,
                     "resale_est": resale,
                     "margin": round(margin, 2),
