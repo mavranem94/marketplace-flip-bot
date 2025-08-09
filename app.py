@@ -46,7 +46,7 @@ def estimate_resale_price(title, price):
 
 
 async def facebook_login_and_page(playwright, headless=True):
-    """Launch browser, navigate to Facebook and log in using secrets. Returns logged-in page."""
+    """Launch browser, navigate to Facebook Marketplace (target location) and log in using secrets. Returns logged-in page."""
     # Attempt to use system-installed Chromium path if available
     chromium_path = os.environ.get("CHROMIUM_PATH")
     if not chromium_path:
@@ -84,17 +84,23 @@ async def facebook_login_and_page(playwright, headless=True):
     context = await browser.new_context()
     page = await context.new_page()
 
-    await page.goto("https://www.facebook.com/", wait_until="networkidle")
+    # Go directly to Facebook Marketplace in the target location
+    target_url = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
+    await page.goto(target_url, wait_until="networkidle")
+    await page.wait_for_timeout(8000)  # Give extra time for listings to load
 
-    # Login flow (may change over time)
+    # If a login is required, attempt it and then reload the target Marketplace page
     try:
-        if FB_EMAIL and FB_PASSWORD:
-            await page.fill("input[name='email']", FB_EMAIL)
-            await page.fill("input[name='pass']", FB_PASSWORD)
-            await page.click("button[name=login]")
-            await page.wait_for_timeout(4000)
-        else:
-            st.info("No Facebook credentials found in secrets; please login manually in the opened browser window.")
+        if "login" in page.url.lower():
+            if FB_EMAIL and FB_PASSWORD:
+                await page.fill("input[name='email']", FB_EMAIL)
+                await page.fill("input[name='pass']", FB_PASSWORD)
+                await page.click("button[name=login]")
+                await page.wait_for_timeout(5000)
+                await page.goto(target_url, wait_until="networkidle")
+                await page.wait_for_timeout(8000)
+            else:
+                st.info("No Facebook credentials found in secrets; please login manually in the opened browser window.")
     except Exception as e:
         st.error(f"Login attempt failed: {e}")
 
