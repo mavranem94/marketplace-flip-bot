@@ -135,7 +135,7 @@ async def scrape_marketplace_headless(keywords, limit=10, headless=True):
                 last_height = height
                 
                 # Find article tiles
-                        tiles = await page.query_selector_all("[role='article']")
+                tiles = await page.query_selector_all("[role='article']")
                         count = 0
                         for tile in tiles:
                             if count >= limit:
