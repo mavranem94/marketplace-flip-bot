@@ -1,5 +1,3 @@
-
-```python
 # app.py
 # Streamlit + Playwright Marketplace Flip Bot (Cloud-ready prototype)
 
@@ -277,6 +275,3 @@ if st.session_state.get("last_scrape") is not None:
 
 st.markdown("---")
 st.caption("Important: This project is a technical prototype. Using automated accounts to message or post at scale may violate platform terms of service and risk account suspension.")
-```
-
----
