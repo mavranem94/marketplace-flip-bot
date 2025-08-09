@@ -6,16 +6,9 @@ import pandas as pd
 import streamlit as st
 from playwright.async_api import async_playwright
 
-# ---------------------
-# Config
-# ---------------------
 MAX_LISTINGS = 50
 TARGET_LOCATION = st.session_state.get("target_location", "London")
-GUMTREE_URL = f"https://www.gumtree.com/search?search_category=for-sale&q=&search_location={TARGET_LOCATION.lower()}"
-
-# ---------------------
-# Helper functions
-# ---------------------
+GUMTREE_URL = f"https://www.gumtree.com/search?search_category=for-sale&search_location={TARGET_LOCATION.lower()}"
 
 def estimate_resale_price(title, price):
     if any(k in title.lower() for k in ["sofa", "couch", "armchair"]):
@@ -30,11 +23,7 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
     results = []
     async with async_playwright() as p:
         chromium_path = os.environ.get("CHROMIUM_PATH")
-        possible_paths = [
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-            "/usr/bin/google-chrome"
-        ]
+        possible_paths = ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]
         if not chromium_path:
             for path in possible_paths:
                 if os.path.exists(path):
@@ -52,12 +41,12 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
         context = await browser.new_context()
         page = await context.new_page()
 
-        await page.goto(GUMTREE_URL, wait_until="domcontentloaded")
+        await page.goto(GUMTREE_URL, wait_until="networkidle")
         await page.wait_for_timeout(3000)
 
-        # Scroll to load more listings
-        for _ in range(8):
-            await page.mouse.wheel(0, 3000)
+        # Scroll to load more
+        for _ in range(15):
+            await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1500)
 
         listings = await page.query_selector_all('article[data-q="search-result"]')
@@ -98,9 +87,6 @@ def score_listing(item, min_margin=0.25):
     item["viable"] = item.get("margin", 0) >= min_margin
     return item
 
-# ---------------------
-# Streamlit UI
-# ---------------------
 st.set_page_config(page_title="Gumtree Flip Bot", layout="wide")
 st.title("🛍️ Gumtree Flip Bot — Streamlit Prototype")
 
