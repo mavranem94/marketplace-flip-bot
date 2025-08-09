@@ -1,12 +1,13 @@
-# app.py — Streamlit + Playwright Marketplace Flip Bot (Cloud-ready, revised)
+# app.py — Streamlit + Playwright Marketplace Flip Bot (Cloud-ready, login-debug + cookie persistence)
 
 import os
-# Ensure Playwright browser is available in the container
+# Ensure Playwright browser is available in the container (harmless if already installed)
 os.system("python -m playwright install chromium")
 
 import asyncio
 import re
 from datetime import datetime
+import json
 import pandas as pd
 import streamlit as st
 import openai
@@ -23,13 +24,13 @@ FB_PASSWORD = st.secrets.get("FB_PASSWORD") or os.getenv("FB_PASSWORD")
 TARGET_LOCATION = st.session_state.get("target_location", "London")
 MIN_PROFIT_MARGIN = st.session_state.get("min_profit_margin", 0.25)
 MAX_LISTINGS = 100  # adjustable
+STATE_PATH = "fb_state.json"  # cookie/session state (ephemeral on Streamlit Cloud per deploy)
 
 if OPENAI_KEY is None:
     st.warning("Set your OpenAI API key in Streamlit Secrets (OPENAI_API_KEY) before using the app.")
 else:
     openai.api_key = OPENAI_KEY
 
-# Optional warning if FB creds are missing
 if not FB_EMAIL or not FB_PASSWORD:
     st.info("FB_EMAIL / FB_PASSWORD not set. Marketplace content may be limited when logged out.")
 
@@ -50,7 +51,9 @@ def estimate_resale_price(title: str, price: int) -> int:
 
 
 async def facebook_login_and_page(playwright, target_location: str, headless: bool = True):
-    """Launch Chromium in a Streamlit Cloud-friendly way, go to Marketplace for target location, handle login."""
+    """Launch Chromium (cloud-friendly), create context (reusing cookies if present), go to Marketplace, handle login.
+    Returns (browser, context, page).
+    """
     # Find a usable Chromium executable in the container
     chromium_path = os.environ.get("CHROMIUM_PATH")
     if not chromium_path:
@@ -75,41 +78,60 @@ async def facebook_login_and_page(playwright, target_location: str, headless: bo
         raise RuntimeError("No valid Chromium executable found in container.")
 
     browser = await playwright.chromium.launch(**launch_options)
-    context = await browser.new_context()
+
+    # Reuse session if we have it
+    context_kwargs = {}
+    if os.path.exists(STATE_PATH):
+        context_kwargs["storage_state"] = STATE_PATH
+        st.write("Using saved FB session state.")
+
+    context = await browser.new_context(**context_kwargs)
     page = await context.new_page()
 
     target_url = f"https://www.facebook.com/marketplace/{target_location.lower()}"
     await page.goto(target_url, wait_until="networkidle")
     st.write("After first goto, URL:", page.url)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(2000)
 
-    # Pre-login scroll to trigger lazy load
-    for _ in range(3):
-        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(1200)
-
-    # If redirected to login, try credentials
-    if "login" in page.url.lower():
+    # If redirected to login, try login flow explicitly
+    if "login" in page.url.lower() or "/login/" in page.url.lower():
         st.info("Redirected to Facebook login page.")
-        if FB_EMAIL and FB_PASSWORD:
-            try:
+        await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded")
+        try:
+            await page.wait_for_selector("input[name='email']", timeout=10000)
+            if FB_EMAIL and FB_PASSWORD:
                 await page.fill("input[name='email']", FB_EMAIL)
                 await page.fill("input[name='pass']", FB_PASSWORD)
                 await page.click("button[name=login]")
                 await page.wait_for_load_state("networkidle")
                 st.write("After login submit, URL:", page.url)
 
-                await page.goto(target_url, wait_until="networkidle")
-                st.write("After returning to Marketplace, URL:", page.url)
-                await page.wait_for_timeout(3000)
+                # Check for checkpoint/2FA indications
+                current_html = await page.content()
+                if any(x in current_html.lower() for x in ["two-factor", "checkpoint", "approve your login"]):
+                    st.error("Facebook triggered a security checkpoint/2FA. Manual verification is required on this account.")
+                else:
+                    # Save session cookies for reuse next time
+                    try:
+                        await context.storage_state(path=STATE_PATH)
+                        st.write("Saved FB session state to fb_state.json")
+                    except Exception as e:
+                        st.write(f"Could not save session state: {e}")
 
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(1200)
-            except Exception as e:
-                st.error(f"Login automation failed: {e}")
-        else:
-            st.error("Login required but FB_EMAIL/FB_PASSWORD not provided in Secrets.")
+                    # Navigate back to marketplace now that we (likely) have a session
+                    await page.goto(target_url, wait_until="networkidle")
+                    st.write("After returning to Marketplace, URL:", page.url)
+                    await page.wait_for_timeout(2000)
+
+            else:
+                st.error("Login required but FB_EMAIL/FB_PASSWORD not provided in Secrets.")
+        except Exception as e:
+            st.error(f"Login automation failed: {e}")
+
+    # Light pre-scroll to trigger lazy load
+    for _ in range(3):
+        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1000)
 
     return browser, context, page
 
@@ -118,15 +140,16 @@ async def scrape_marketplace_headless(keywords, limit: int = 10, headless: bool 
     """Scroll to load results, collect item links, open each item page for stable title/price extraction."""
     results = []
     async with async_playwright() as p:
+        # NOTE: Streamlit Cloud cannot show a visible browser; headless=True is effectively required there.
         browser, context, page = await facebook_login_and_page(p, TARGET_LOCATION, headless=headless)
         try:
             # Ensure we’re on the correct location page
             target_url = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
             await page.goto(target_url, wait_until="networkidle")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1500)
 
             # Scroll a lot to load many items
-            max_scrolls = 18  # increase if needed
+            max_scrolls = 20  # raise if needed
             last_height = 0
             for _ in range(max_scrolls):
                 await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
@@ -138,6 +161,7 @@ async def scrape_marketplace_headless(keywords, limit: int = 10, headless: bool 
 
             # Collect item links (more robust than tile containers)
             anchors = await page.query_selector_all("a[href*='/marketplace/item/']")
+            st.write("Found raw item anchors:", len(anchors))
             seen = set()
             count = 0
 
@@ -219,7 +243,7 @@ async def scrape_marketplace_headless(keywords, limit: int = 10, headless: bool 
             await browser.close()
 
             if not results:
-                st.info("No items parsed. Try disabling keyword filter or increasing scrolls.")
+                st.info("No items parsed. Try disabling keyword filter, increasing scrolls, or ensure login succeeded.")
             else:
                 st.write("Sample parsed titles:", [r["title"] for r in results[:5]])
 
@@ -298,6 +322,8 @@ with st.sidebar:
     keywords_text = st.text_input("Search keywords (comma separated)", value="bike,iPhone,sofa")
     min_margin = st.slider("Min profit margin", 0.05, 1.0, 0.25)
     target_loc = st.text_input("Target location (for URL)", value=TARGET_LOCATION)
+    # Debug toggle (note: Streamlit Cloud cannot show non-headless UI; this is mainly for local runs)
+    debug_show_browser = st.checkbox("Debug: show browser (non-headless — local only)", value=False)
     st.write("\nFacebook credentials should be stored in Streamlit Secrets for security.")
 
 if st.button("Run Scraper"):
@@ -305,9 +331,9 @@ if st.button("Run Scraper"):
     TARGET_LOCATION = target_loc
     keywords = [k.strip() for k in keywords_text.split(",") if k.strip()]
 
-    st.info("Running scraper — this may take 15–30s in the cloud.")
+    st.info("Running scraper — this may take 15–45s in the cloud.")
     with st.spinner("Scraping Marketplace..."):
-        items = asyncio.run(scrape_marketplace_headless(keywords, limit=MAX_LISTINGS, headless=True))
+        items = asyncio.run(scrape_marketplace_headless(keywords, limit=MAX_LISTINGS, headless=(not debug_show_browser)))
         scored = [score_listing(it, min_margin) for it in items]
         if not scored:
             st.warning("No items found — try broader keywords, increase scrolling, or ensure login succeeded.")
