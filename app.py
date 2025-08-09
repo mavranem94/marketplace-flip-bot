@@ -133,7 +133,8 @@ async def scrape_marketplace_headless(keywords, limit=10, headless=True):
                 if height == last_height:
                     break
                 last_height = height
-                        # Find article tiles
+                
+                # Find article tiles
                         tiles = await page.query_selector_all("[role='article']")
                         count = 0
                         for tile in tiles:
