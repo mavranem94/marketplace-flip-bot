@@ -1,11 +1,10 @@
-# app.py
-# Streamlit + Playwright Marketplace Flip Bot (Cloud-ready prototype)
+# app.py — Streamlit + Playwright Marketplace Flip Bot (Cloud-ready, revised)
 
 import os
+# Ensure Playwright browser is available in the container
 os.system("python -m playwright install chromium")
 
 import asyncio
-import os
 import re
 from datetime import datetime
 import pandas as pd
@@ -14,49 +13,50 @@ import openai
 from playwright.async_api import async_playwright
 
 # ---------------------
-# Configuration
+# Configuration & Secrets
 # ---------------------
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 FB_EMAIL = st.secrets.get("FB_EMAIL") or os.getenv("FB_EMAIL")
 FB_PASSWORD = st.secrets.get("FB_PASSWORD") or os.getenv("FB_PASSWORD")
+
+# Defaults (UI can override below)
 TARGET_LOCATION = st.session_state.get("target_location", "London")
 MIN_PROFIT_MARGIN = st.session_state.get("min_profit_margin", 0.25)
-MAX_LISTINGS = 100
-FACEBOOK_MARKETPLACE_URL = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
+MAX_LISTINGS = 100  # adjustable
 
 if OPENAI_KEY is None:
     st.warning("Set your OpenAI API key in Streamlit Secrets (OPENAI_API_KEY) before using the app.")
 else:
     openai.api_key = OPENAI_KEY
 
+# Optional warning if FB creds are missing
+if not FB_EMAIL or not FB_PASSWORD:
+    st.info("FB_EMAIL / FB_PASSWORD not set. Marketplace content may be limited when logged out.")
+
 # ---------------------
-# Helper functions
+# Helpers
 # ---------------------
 
-def estimate_resale_price(title, price):
-    """A placeholder function. Replace with calls to eBay/Amazon APIs or heuristics."""
-    # naive heuristic: assume 1.5x resale for electronics, 1.8x for furniture if price < 500
-    if any(k in title.lower() for k in ["sofa", "couch", "armchair"]):
+def estimate_resale_price(title: str, price: int) -> int:
+    """Very rough heuristic. Replace with eBay/Amazon API calls if desired."""
+    t = title.lower()
+    if any(k in t for k in ["sofa", "couch", "armchair"]):
         factor = 1.8
-    elif any(k in title.lower() for k in ["iphone", "phone", "macbook", "laptop"]):
+    elif any(k in t for k in ["iphone", "phone", "macbook", "laptop"]):
         factor = 1.6
     else:
         factor = 1.4
-    return int(price * factor)
+    return max(int(price * factor), price + 1)
 
 
-async def facebook_login_and_page(playwright, headless=True):
-    """Launch browser, navigate to Facebook Marketplace (target location) and log in using secrets. Returns logged-in page."""
+async def facebook_login_and_page(playwright, target_location: str, headless: bool = True):
+    """Launch Chromium in a Streamlit Cloud-friendly way, go to Marketplace for target location, handle login."""
+    # Find a usable Chromium executable in the container
     chromium_path = os.environ.get("CHROMIUM_PATH")
     if not chromium_path:
-        possible_paths = [
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-            "/usr/bin/google-chrome"
-        ]
-        for path in possible_paths:
-            if os.path.exists(path):
-                chromium_path = path
+        for p in ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]:
+            if os.path.exists(p):
+                chromium_path = p
                 break
 
     launch_options = {
@@ -66,127 +66,163 @@ async def facebook_login_and_page(playwright, headless=True):
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--single-process",
-            "--disable-setuid-sandbox"
-        ]
+            "--disable-setuid-sandbox",
+        ],
     }
     if chromium_path and os.path.exists(chromium_path):
         launch_options["executable_path"] = chromium_path
     else:
-        raise RuntimeError(f"No valid Chromium executable found. Tried paths: {possible_paths} and CHROMIUM_PATH env.")
+        raise RuntimeError("No valid Chromium executable found in container.")
 
-    try:
-        browser = await playwright.chromium.launch(**launch_options)
-    except Exception as e:
-        raise RuntimeError(f"Failed to launch Chromium. Checked path: {chromium_path}. Error: {type(e).__name__}: {e}")
-
+    browser = await playwright.chromium.launch(**launch_options)
     context = await browser.new_context()
     page = await context.new_page()
 
-    target_url = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
-    await page.goto(target_url)
-    await page.wait_for_load_state("networkidle")
-    await page.wait_for_timeout(5000)
+    target_url = f"https://www.facebook.com/marketplace/{target_location.lower()}"
+    await page.goto(target_url, wait_until="networkidle")
+    st.write("After first goto, URL:", page.url)
+    await page.wait_for_timeout(3000)
 
-    # Scroll to load more items before login check
+    # Pre-login scroll to trigger lazy load
     for _ in range(3):
-        await page.mouse.wheel(0, 3000)
-        await page.wait_for_timeout(2000)
+        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1200)
 
-    # If a login is required, attempt it and then reload the target Marketplace page
-    try:
-        if "login" in page.url.lower():
-            if FB_EMAIL and FB_PASSWORD:
+    # If redirected to login, try credentials
+    if "login" in page.url.lower():
+        st.info("Redirected to Facebook login page.")
+        if FB_EMAIL and FB_PASSWORD:
+            try:
                 await page.fill("input[name='email']", FB_EMAIL)
                 await page.fill("input[name='pass']", FB_PASSWORD)
                 await page.click("button[name=login]")
                 await page.wait_for_load_state("networkidle")
-                await page.goto(target_url)
-                await page.wait_for_load_state("networkidle")
-                await page.wait_for_timeout(5000)
+                st.write("After login submit, URL:", page.url)
+
+                await page.goto(target_url, wait_until="networkidle")
+                st.write("After returning to Marketplace, URL:", page.url)
+                await page.wait_for_timeout(3000)
+
                 for _ in range(3):
-                    await page.mouse.wheel(0, 3000)
-                    await page.wait_for_timeout(2000)
-            else:
-                st.info("No Facebook credentials found in secrets; please login manually in the opened browser window.")
-    except Exception as e:
-        st.error(f"Login attempt failed: {e}")
+                    await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(1200)
+            except Exception as e:
+                st.error(f"Login automation failed: {e}")
+        else:
+            st.error("Login required but FB_EMAIL/FB_PASSWORD not provided in Secrets.")
 
     return browser, context, page
 
 
-async def scrape_marketplace_headless(keywords, limit=10, headless=True):
-    """Scrapes the Marketplace listing tiles and returns a list of dicts. This is a best-effort prototype — selectors may break."""
+async def scrape_marketplace_headless(keywords, limit: int = 10, headless: bool = True):
+    """Scroll to load results, collect item links, open each item page for stable title/price extraction."""
     results = []
     async with async_playwright() as p:
-        browser, context, page = await facebook_login_and_page(p, headless=headless)
+        browser, context, page = await facebook_login_and_page(p, TARGET_LOCATION, headless=headless)
         try:
-            await page.goto(FACEBOOK_MARKETPLACE_URL, wait_until="networkidle")
-            await page.wait_for_timeout(3000)
+            # Ensure we’re on the correct location page
+            target_url = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
+            await page.goto(target_url, wait_until="networkidle")
+            await page.wait_for_timeout(2000)
 
-            # Scroll to load more listings
-            max_scrolls = 12  # start with 10–12; raise if needed
+            # Scroll a lot to load many items
+            max_scrolls = 18  # increase if needed
             last_height = 0
-            for i in range(max_scrolls):
+            for _ in range(max_scrolls):
                 await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(1200)
                 height = await page.evaluate("document.body.scrollHeight")
                 if height == last_height:
                     break
                 last_height = height
-                
-                # Find article tiles
-                tiles = await page.query_selector_all("[role='article']")
-                count = 0
-                for tile in tiles:
-                            if count >= limit:
-                                break
-                            try:
-                                title = await tile.query_selector_eval("h2", "el=>el.innerText")
-                            except Exception:
-                                try:
-                                    title = await tile.query_selector_eval("span", "el=>el.innerText")
-                                except Exception:
-                                    continue
 
-                # crude price extraction
-                try:
-                    price_text = await tile.query_selector_eval("[aria-label*='£']", "el=>el.innerText")
-                except Exception:
-                    try:
-                        price_text = await tile.query_selector_eval("span", "el=>el.innerText")
-                    except Exception:
-                        price_text = ""
+            # Collect item links (more robust than tile containers)
+            anchors = await page.query_selector_all("a[href*='/marketplace/item/']")
+            seen = set()
+            count = 0
 
-                nums = re.sub(r"[^0-9]", "", price_text or "")
-                if nums == "":
+            for a in anchors:
+                if count >= limit:
+                    break
+                href = await a.get_attribute("href")
+                if not href:
                     continue
-                price = int(nums)
+                if not href.startswith("http"):
+                    href = f"https://www.facebook.com{href}"
+                if href in seen:
+                    continue
+                seen.add(href)
 
-                link = None
+                # Open the item page for stable selectors
+                item_page = await context.new_page()
                 try:
-                    ah = await tile.query_selector("a")
-                    link = await ah.get_attribute("href")
-                except Exception:
-                    link = None
+                    await item_page.goto(href, wait_until="networkidle")
+                    await item_page.wait_for_timeout(1200)
 
-                resale = estimate_resale_price(title, price)
-                margin = (resale - price) / max(price, 1)
+                    # Title candidates
+                    title = None
+                    for sel in [
+                        "h1",
+                        "[data-ad-preview='message']",
+                        "div[role='heading']",
+                    ]:
+                        try:
+                            title = await item_page.query_selector_eval(sel, "el => el.innerText")
+                            if title and title.strip():
+                                break
+                        except Exception:
+                            pass
 
-                item = {
-                    "title": title,
-                    "price": price,
-                    "resale_est": resale,
-                    "margin": round(margin, 2),
-                    "link": link,
-                    "scraped_at": datetime.utcnow().isoformat()
-                }
+                    # Price candidates (GBP and generic)
+                    price_text = None
+                    for sel in [
+                        "span[aria-label*='£']",
+                        "div[aria-label*='£'] span",
+                        "div[role='main'] span:has-text('£')",
+                        "span:has-text('£')",
+                    ]:
+                        try:
+                            price_text = await item_page.query_selector_eval(sel, "el => el.innerText")
+                            if price_text and price_text.strip():
+                                break
+                        except Exception:
+                            pass
 
-                # simple keyword filter
-                if any(k.lower() in title.lower() for k in keywords):
-                    results.append(item)
-                    count += 1
+                    if not title or not price_text:
+                        continue
+
+                    nums = re.sub(r"[^0-9]", "", price_text)
+                    if not nums:
+                        continue
+                    price = int(nums)
+
+                    resale = estimate_resale_price(title, price)
+                    margin = (resale - price) / max(price, 1)
+
+                    item = {
+                        "title": title.strip(),
+                        "price": price,
+                        "resale_est": resale,
+                        "margin": round(margin, 2),
+                        "link": href,
+                        "scraped_at": datetime.utcnow().isoformat(),
+                    }
+
+                    # Case-insensitive partial keyword match
+                    if not keywords or any(k.lower() in title.lower() for k in keywords):
+                        results.append(item)
+                        count += 1
+
+                finally:
+                    await item_page.close()
 
             await browser.close()
+
+            if not results:
+                st.info("No items parsed. Try disabling keyword filter or increasing scrolls.")
+            else:
+                st.write("Sample parsed titles:", [r["title"] for r in results[:5]])
+
         except Exception as e:
             await browser.close()
             st.error(f"Scraping failed: {e}")
@@ -209,7 +245,7 @@ def openai_generate_message(title, price):
         resp = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=160
+            max_tokens=160,
         )
         return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -217,18 +253,16 @@ def openai_generate_message(title, price):
 
 
 async def send_message_to_seller(page, listing_url, message):
-    """Prototype: open the listing and use Messenger button to send message. Real selectors depend on FB's current DOM."""
+    """Prototype — selectors are fragile and may break as FB changes UI."""
     try:
         if listing_url:
             await page.goto(listing_url, wait_until="networkidle")
-            await page.wait_for_timeout(2000)
-            # This code is fragile — fb changes often. It's a **prototype** only.
-            # Example: click message/contact button and fill the composer.
-            await page.click("text=Message")
             await page.wait_for_timeout(1000)
+            await page.click("text=Message")
+            await page.wait_for_timeout(600)
             await page.fill("div[contenteditable='true']", message)
             await page.keyboard.press("Enter")
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(600)
             return True
     except Exception as e:
         st.write(f"Auto-message failed: {e}")
@@ -236,22 +270,17 @@ async def send_message_to_seller(page, listing_url, message):
 
 
 async def create_resale_listing(page, item, markup=1.25):
-    """Prototype stub — opens 'Sell' flow and fills certain fields. VERY fragile and may not work reliably.
+    """Prototype — opens create flow and pre-fills fields. May break as FB changes UI.
     IMPORTANT: Posting items you do not own or cannot deliver may violate platform rules and local law.
     """
     try:
         await page.goto("https://www.facebook.com/marketplace/create/item", wait_until="networkidle")
-        await page.wait_for_timeout(2000)
-        # Attempt to fill title, price, description
-        await page.fill("input[aria-label='Title']", item["title"])
+        await page.wait_for_timeout(1000)
+        await page.fill("input[aria-label='Title']", item["title"])  # selectors may vary
         price_to_post = int(item["price"] * markup)
         await page.fill("input[aria-label='Price']", str(price_to_post))
         desc = f"Resale: {item['title']}. In good condition. Local pickup in {TARGET_LOCATION}."
         await page.fill("textarea[aria-label='Description']", desc)
-        # Not uploading photos in this prototype
-        # Submit (this will likely change) — commented out for safety
-        # await page.click("text=Next")
-        # await page.wait_for_timeout(1000)
         return True
     except Exception as e:
         st.write(f"Create listing failed: {e}")
@@ -266,24 +295,26 @@ st.title("🛍️ Marketplace Flip Bot — Streamlit Cloud Prototype")
 
 with st.sidebar:
     st.header("Settings")
-    keywords = st.text_input("Search keywords (comma separated)", value="bike,iPhone,sofa")
+    keywords_text = st.text_input("Search keywords (comma separated)", value="bike,iPhone,sofa")
     min_margin = st.slider("Min profit margin", 0.05, 1.0, 0.25)
-    target_loc = st.text_input("Target location (for URL)", value="London")
+    target_loc = st.text_input("Target location (for URL)", value=TARGET_LOCATION)
     st.write("\nFacebook credentials should be stored in Streamlit Secrets for security.")
 
 if st.button("Run Scraper"):
-    kws = [k.strip() for k in keywords.split(",") if k.strip()]
-    st.info("Running scraper — this may take 10–20s in the cloud.")
+    # Make the sidebar location actually drive the scraper
+    TARGET_LOCATION = target_loc
+    keywords = [k.strip() for k in keywords_text.split(",") if k.strip()]
+
+    st.info("Running scraper — this may take 15–30s in the cloud.")
     with st.spinner("Scraping Marketplace..."):
-        items = asyncio.run(scrape_marketplace_headless(kws, limit=MAX_LISTINGS, headless=True))
+        items = asyncio.run(scrape_marketplace_headless(keywords, limit=MAX_LISTINGS, headless=True))
         scored = [score_listing(it, min_margin) for it in items]
         if not scored:
-            st.warning("No items found — try looser keywords or increase MAX_LISTINGS.")
+            st.warning("No items found — try broader keywords, increase scrolling, or ensure login succeeded.")
         else:
             df = pd.DataFrame(scored)
             st.dataframe(df)
             st.session_state["last_scrape"] = df
-
 
 st.markdown("---")
 
@@ -305,15 +336,15 @@ if st.session_state.get("last_scrape") is not None:
         try:
             async def _send():
                 async with async_playwright() as p:
-                    browser, context, page = await facebook_login_and_page(p, headless=True)
+                    browser, context, page = await facebook_login_and_page(p, TARGET_LOCATION, headless=True)
                     ok = await send_message_to_seller(page, row.get('link'), msg)
                     await browser.close()
                     return ok
             res = asyncio.run(_send())
             if res:
-                st.success("Message sent (or attempted). Check your Facebook account to confirm.)")
+                st.success("Message sent (or attempted). Check your Facebook account to confirm.")
             else:
-                st.error("Auto-message attempt failed. Check logs or try manual messaging.")
+                st.error("Auto-message attempt failed. Try manual messaging.")
         except Exception as e:
             st.error(f"Auto-send failed: {e}")
 
@@ -322,7 +353,7 @@ if st.session_state.get("last_scrape") is not None:
         try:
             async def _create():
                 async with async_playwright() as p:
-                    browser, context, page = await facebook_login_and_page(p, headless=True)
+                    browser, context, page = await facebook_login_and_page(p, TARGET_LOCATION, headless=True)
                     ok = await create_resale_listing(page, row, markup=1.3)
                     await browser.close()
                     return ok
@@ -335,4 +366,4 @@ if st.session_state.get("last_scrape") is not None:
             st.error(f"Auto-create failed: {e}")
 
 st.markdown("---")
-st.caption("Important: This project is a technical prototype. Using automated accounts to message or post at scale may violate platform terms of service and risk account suspension.")
+st.caption("Important: Prototype only. Automating Facebook can violate its Terms of Service and risk account restrictions. Use a test account and act lawfully.")
