@@ -47,8 +47,12 @@ def estimate_resale_price(title, price):
 
 async def facebook_login_and_page(playwright, headless=True):
     """Launch browser, navigate to Facebook and log in using secrets. Returns logged-in page."""
-     # Attempt to use system-installed Chromium path if available
-    chromium_path = os.environ.get("CHROMIUM_PATH")  # Set this in Streamlit Cloud if needed
+    # Attempt to use system-installed Chromium path if available
+    chromium_path = os.environ.get("CHROMIUM_PATH")
+    if not chromium_path:
+        # Try common install location in Streamlit Cloud
+        chromium_path = "/usr/bin/chromium-browser"
+
     launch_options = {
         "headless": headless,
         "args": [
@@ -59,19 +63,24 @@ async def facebook_login_and_page(playwright, headless=True):
             "--disable-setuid-sandbox"
         ]
     }
-    if chromium_path:
+    if chromium_path and os.path.exists(chromium_path):
         launch_options["executable_path"] = chromium_path
 
-    browser = await playwright.chromium.launch(**launch_options)
+    try:
+        browser = await playwright.chromium.launch(**launch_options)
+    except Exception as e:
+        raise RuntimeError(f"Failed to launch Chromium. Checked path: {chromium_path}. Error: {e}")
+
     context = await browser.new_context()
     page = await context.new_page()
 
     await page.goto("https://www.facebook.com/", wait_until="networkidle")
+
     # Login flow (may change over time)
     try:
         if FB_EMAIL and FB_PASSWORD:
-            await page.fill("input[name=\"email\"]", FB_EMAIL)
-            await page.fill("input[name=\"pass\"]", FB_PASSWORD)
+            await page.fill("input[name='email']", FB_EMAIL)
+            await page.fill("input[name='pass']", FB_PASSWORD)
             await page.click("button[name=login]")
             await page.wait_for_timeout(4000)
         else:
