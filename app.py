@@ -21,7 +21,7 @@ FB_EMAIL = st.secrets.get("FB_EMAIL") or os.getenv("FB_EMAIL")
 FB_PASSWORD = st.secrets.get("FB_PASSWORD") or os.getenv("FB_PASSWORD")
 TARGET_LOCATION = st.session_state.get("target_location", "London")
 MIN_PROFIT_MARGIN = st.session_state.get("min_profit_margin", 0.25)
-MAX_LISTINGS = 15
+MAX_LISTINGS = 100
 FACEBOOK_MARKETPLACE_URL = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
 
 if OPENAI_KEY is None:
