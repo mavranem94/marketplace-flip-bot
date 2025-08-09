@@ -1,6 +1,7 @@
 # app.py — Streamlit + Playwright Gumtree Flip Bot (Cloud-ready prototype)
 
 import os
+import shutil
 os.system("python -m playwright install chromium")
 
 import asyncio
@@ -22,6 +23,17 @@ GUMTREE_URL = f"https://www.gumtree.com/search?search_category=for-sale&search_l
 # Helper functions
 # ---------------------
 
+def get_chromium_path():
+    possible_paths = [
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "/usr/bin/google-chrome"
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return shutil.which("chromium") or shutil.which("google-chrome")
+
 def estimate_resale_price(title, price):
     if any(k in title.lower() for k in ["sofa", "couch", "armchair"]):
         factor = 1.8
@@ -34,7 +46,21 @@ def estimate_resale_price(title, price):
 async def scrape_gumtree_headless(keywords, limit=10, headless=True):
     results = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, args=["--no-sandbox"])
+        chromium_path = get_chromium_path()
+        launch_options = {
+            "headless": headless,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-setuid-sandbox"
+            ]
+        }
+        if chromium_path:
+            launch_options["executable_path"] = chromium_path
+
+        browser = await p.chromium.launch(**launch_options)
         context = await browser.new_context()
         page = await context.new_page()
 
