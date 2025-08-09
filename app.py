@@ -29,7 +29,15 @@ def estimate_resale_price(title, price):
 async def scrape_gumtree_headless(keywords, limit=10, headless=True):
     results = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, args=["--no-sandbox"])
+        chromium_path = os.environ.get("CHROMIUM_PATH")
+        launch_options = {
+            "headless": headless,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process", "--disable-setuid-sandbox"]
+        }
+        if chromium_path and os.path.exists(chromium_path):
+            launch_options["executable_path"] = chromium_path
+
+        browser = await p.chromium.launch(**launch_options)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -44,7 +52,7 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
             try:
                 title = await listing.query_selector_eval('h2[data-q="tile-title"]', 'el => el.innerText')
                 price_text = await listing.query_selector_eval('strong[data-q="tile-price"]', 'el => el.innerText')
-                link = await listing.query_selector_eval('a[href*="/p/"], a[href*="/s-"]', 'el => el.href')
+                link = await listing.query_selector_eval('a[data-q="search-result-anchor"]', 'el => el.href')
             except:
                 continue
 
