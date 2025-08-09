@@ -47,10 +47,8 @@ def estimate_resale_price(title, price):
 
 async def facebook_login_and_page(playwright, headless=True):
     """Launch browser, navigate to Facebook Marketplace (target location) and log in using secrets. Returns logged-in page."""
-    # Attempt to use system-installed Chromium path if available
     chromium_path = os.environ.get("CHROMIUM_PATH")
     if not chromium_path:
-        # Try common install locations in container environments
         possible_paths = [
             "/usr/bin/chromium-browser",
             "/usr/bin/chromium",
@@ -84,10 +82,15 @@ async def facebook_login_and_page(playwright, headless=True):
     context = await browser.new_context()
     page = await context.new_page()
 
-    # Go directly to Facebook Marketplace in the target location
     target_url = f"https://www.facebook.com/marketplace/{TARGET_LOCATION.lower()}"
-    await page.goto(target_url, wait_until="networkidle")
-    await page.wait_for_timeout(8000)  # Give extra time for listings to load
+    await page.goto(target_url)
+    await page.wait_for_load_state("networkidle")
+    await page.wait_for_timeout(5000)
+
+    # Scroll to load more items before login check
+    for _ in range(3):
+        await page.mouse.wheel(0, 3000)
+        await page.wait_for_timeout(2000)
 
     # If a login is required, attempt it and then reload the target Marketplace page
     try:
@@ -96,9 +99,13 @@ async def facebook_login_and_page(playwright, headless=True):
                 await page.fill("input[name='email']", FB_EMAIL)
                 await page.fill("input[name='pass']", FB_PASSWORD)
                 await page.click("button[name=login]")
+                await page.wait_for_load_state("networkidle")
+                await page.goto(target_url)
+                await page.wait_for_load_state("networkidle")
                 await page.wait_for_timeout(5000)
-                await page.goto(target_url, wait_until="networkidle")
-                await page.wait_for_timeout(8000)
+                for _ in range(3):
+                    await page.mouse.wheel(0, 3000)
+                    await page.wait_for_timeout(2000)
             else:
                 st.info("No Facebook credentials found in secrets; please login manually in the opened browser window.")
     except Exception as e:
