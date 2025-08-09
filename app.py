@@ -47,16 +47,23 @@ def estimate_resale_price(title, price):
 
 async def facebook_login_and_page(playwright, headless=True):
     """Launch browser, navigate to Facebook and log in using secrets. Returns logged-in page."""
-    browser = await playwright.chromium.launch(
-        headless=headless,
-        args=[
+     # Attempt to use system-installed Chromium path if available
+    chromium_path = os.environ.get("CHROMIUM_PATH")  # Set this in Streamlit Cloud if needed
+    launch_options = {
+        "headless": headless,
+        "args": [
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--single-process",
             "--disable-setuid-sandbox"
         ]
-    )    context = await browser.new_context()
+    }
+    if chromium_path:
+        launch_options["executable_path"] = chromium_path
+
+    browser = await playwright.chromium.launch(**launch_options)
+    context = await browser.new_context()
     page = await context.new_page()
 
     await page.goto("https://www.facebook.com/", wait_until="networkidle")
