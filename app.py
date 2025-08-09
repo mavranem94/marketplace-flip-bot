@@ -1,6 +1,9 @@
 # app.py
 # Streamlit + Playwright Marketplace Flip Bot (Cloud-ready prototype)
 
+import os
+os.system("python -m playwright install chromium")
+
 import asyncio
 import os
 import re
