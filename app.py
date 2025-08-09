@@ -47,7 +47,7 @@ def estimate_resale_price(title, price):
 
 async def facebook_login_and_page(playwright, headless=True):
     """Launch browser, navigate to Facebook and log in using secrets. Returns logged-in page."""
- browser = await playwright.chromium.launch(
+    browser = await playwright.chromium.launch(
         headless=headless,
         args=[
             "--no-sandbox",
