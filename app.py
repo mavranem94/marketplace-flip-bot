@@ -123,19 +123,29 @@ async def scrape_marketplace_headless(keywords, limit=10, headless=True):
             await page.goto(FACEBOOK_MARKETPLACE_URL, wait_until="networkidle")
             await page.wait_for_timeout(3000)
 
-            # Find article tiles
-            tiles = await page.query_selector_all("[role='article']")
-            count = 0
-            for tile in tiles:
-                if count >= limit:
+            # Scroll to load more listings
+            max_scrolls = 12  # start with 10–12; raise if needed
+            last_height = 0
+            for i in range(max_scrolls):
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1500)
+                height = await page.evaluate("document.body.scrollHeight")
+                if height == last_height:
                     break
-                try:
-                    title = await tile.query_selector_eval("h2", "el=>el.innerText")
-                except Exception:
-                    try:
-                        title = await tile.query_selector_eval("span", "el=>el.innerText")
-                    except Exception:
-                        continue
+                last_height = height
+                        # Find article tiles
+                        tiles = await page.query_selector_all("[role='article']")
+                        count = 0
+                        for tile in tiles:
+                            if count >= limit:
+                                break
+                            try:
+                                title = await tile.query_selector_eval("h2", "el=>el.innerText")
+                            except Exception:
+                                try:
+                                    title = await tile.query_selector_eval("span", "el=>el.innerText")
+                                except Exception:
+                                    continue
 
                 # crude price extraction
                 try:
