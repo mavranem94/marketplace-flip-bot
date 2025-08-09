@@ -7,8 +7,6 @@ import streamlit as st
 from playwright.async_api import async_playwright
 
 MAX_LISTINGS = 100
-TARGET_LOCATION = st.session_state.get("target_location", "London")
-GUMTREE_URL = f"https://www.gumtree.com/search?search_category=for-sale&search_location={TARGET_LOCATION.lower()}"
 
 def estimate_resale_price(title, price):
     if any(k in title.lower() for k in ["sofa", "couch", "armchair"]):
@@ -19,7 +17,42 @@ def estimate_resale_price(title, price):
         factor = 1.4
     return int(price * factor)
 
-async def scrape_gumtree_headless(keywords, limit=10, headless=True):
+async def _dismiss_cookies(page):
+    selectors = [
+        'button:has-text("Accept All")',
+        'button:has-text("Accept all")',
+        'button:has-text("Accept Cookies")',
+        'button:has-text("Accept cookies")',
+        'button:has-text("Agree")',
+    ]
+    for sel in selectors:
+        try:
+            btn = await page.query_selector(sel)
+            if btn:
+                await btn.click()
+                await page.wait_for_timeout(500)
+                break
+        except Exception:
+            continue
+
+async def _scroll_until_end(page, container_selector, limit):
+    previous = 0
+    while True:
+        try:
+            load_more = await page.query_selector('button:has-text("Load more")')
+            if load_more:
+                await load_more.click()
+                await page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1200)
+        listings = await page.query_selector_all(container_selector)
+        if len(listings) >= limit or len(listings) == previous:
+            break
+        previous = len(listings)
+
+async def scrape_gumtree_headless(keywords, location, limit=10, headless=True, debug=False):
     results = []
     async with async_playwright() as p:
         chromium_path = os.environ.get("CHROMIUM_PATH")
@@ -41,44 +74,118 @@ async def scrape_gumtree_headless(keywords, limit=10, headless=True):
         context = await browser.new_context()
         page = await context.new_page()
 
-        await page.goto(GUMTREE_URL, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
+        url_loc = location.lower().replace(" ", "-")
+        url = f"https://www.gumtree.com/search?search_category=for-sale&search_location={url_loc}"
+        await page.goto(url, wait_until="domcontentloaded")
+        await _dismiss_cookies(page)
 
-        # Scroll to load more
-        for _ in range(25):
-            await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1200)
+        container_candidates = [
+            "a[data-testid='listing-link']",
+            "a.listing-link",
+            "article[data-q='search-result']",
+            "li[data-q='search-result']",
+            "a[href*='/p/']",
+        ]
+        title_candidates = [
+            "h2[data-testid='listing-title']",
+            "h2.listing-title",
+            "span.listing-title",
+            "h2[data-q='tile-title']",
+            "h2",
+        ]
+        price_candidates = [
+            "span[data-testid='listing-price']",
+            "div[data-testid='listing-price']",
+            "span.listing-price",
+            "strong[data-q='tile-price']",
+            "span[class*=price]",
+        ]
+        link_candidates = [
+            ":scope",
+            "a[data-testid='listing-link']",
+            "a.listing-link",
+            "a[data-q='search-result-anchor']",
+            "a[href*='/p/']",
+        ]
 
-        listings = await page.query_selector_all('article[data-q="search-result"]')
+        container_selector = ",".join(container_candidates)
+        await _scroll_until_end(page, container_selector, limit)
+        listings = await page.query_selector_all(container_selector)
+
+        debug_records = []
         count = 0
         for listing in listings:
             if count >= limit:
                 break
-            try:
-                title = await listing.query_selector_eval('h2[data-q="tile-title"]', 'el => el.innerText')
-                price_text = await listing.query_selector_eval('strong[data-q="tile-price"]', 'el => el.innerText')
-                link = await listing.query_selector_eval('a[data-q="search-result-anchor"]', 'el => el.href')
-            except:
+            title = price_text = link = None
+            for sel in title_candidates:
+                try:
+                    el = await listing.query_selector(sel)
+                    if el:
+                        title = (await el.inner_text()).strip()
+                        break
+                except Exception:
+                    continue
+            for sel in price_candidates:
+                try:
+                    el = await listing.query_selector(sel)
+                    if el:
+                        price_text = await el.inner_text()
+                        break
+                except Exception:
+                    continue
+            link = await listing.get_attribute("href")
+            if not link:
+                for sel in link_candidates:
+                    try:
+                        el = await listing.query_selector(sel)
+                        if el:
+                            link = await el.get_attribute("href")
+                            if link:
+                                break
+                    except Exception:
+                        continue
+            if not (title and price_text and link):
                 continue
+            if link.startswith("/"):
+                link = "https://www.gumtree.com" + link
 
-            nums = re.sub(r"[^0-9]", "", price_text or "")
-            if nums == "":
+            nums = re.sub(r"[^0-9]", "", price_text)
+            if not nums:
                 continue
             price = int(nums)
 
+            debug_records.append((title, link))
+
             resale = estimate_resale_price(title, price)
             margin = (resale - price) / max(price, 1)
-
             if any(k.lower() in title.lower() for k in keywords):
                 results.append({
-                    "title": title.strip(),
+                    "title": title,
                     "price": price,
                     "resale_est": resale,
                     "margin": round(margin, 2),
                     "link": link,
-                    "scraped_at": datetime.utcnow().isoformat()
+                    "scraped_at": datetime.utcnow().isoformat(),
                 })
                 count += 1
+
+        if debug:
+            st.write(f"Found {len(listings)} listings before filtering")
+            for t, l in debug_records[:5]:
+                st.write(f"{t} -> {l}")
+            if not listings:
+                try:
+                    first = await page.query_selector(container_candidates[0])
+                    snippet = await first.evaluate('el => el.outerHTML') if first else await page.content()
+                    st.write(snippet[:1000])
+                except Exception:
+                    pass
+                try:
+                    hrefs = await page.eval_on_selector_all('a', 'els => els.map(e => e.href).slice(0,10)')
+                    st.write(hrefs)
+                except Exception:
+                    pass
 
         await browser.close()
     return results
@@ -95,11 +202,12 @@ with st.sidebar:
     keywords = st.text_input("Search keywords (comma separated)", value="bike,iPhone,sofa")
     min_margin = st.slider("Min profit margin", 0.05, 1.0, 0.25)
     target_loc = st.text_input("Target location", value="London")
+    debug_mode = st.checkbox("Debug mode")
 
 if st.button("Run Scraper"):
     kws = [k.strip() for k in keywords.split(",") if k.strip()]
     with st.spinner("Scraping Gumtree..."):
-        items = asyncio.run(scrape_gumtree_headless(kws, limit=MAX_LISTINGS, headless=True))
+        items = asyncio.run(scrape_gumtree_headless(kws, target_loc, limit=MAX_LISTINGS, headless=True, debug=debug_mode))
         scored = [score_listing(it, min_margin) for it in items]
         if not scored:
             st.warning("No items found — try looser keywords or increase MAX_LISTINGS.")
